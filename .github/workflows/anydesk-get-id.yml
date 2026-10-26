@@ -1,0 +1,79 @@
+name: AnyDesk - Get Windows ID
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: anydesk-get-id-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  get-anydesk-id:
+    # Run on the Windows machine you registered as a self-hosted runner.
+    # Add the labels "self-hosted" and "Windows" to that runner.
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 5
+
+    steps:
+      - name: Locate AnyDesk
+        id: locate
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'AnyDesk\AnyDesk.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'AnyDesk\AnyDesk.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\AnyDesk\AnyDesk.exe'),
+            (Join-Path $env:APPDATA 'AnyDesk\AnyDesk.exe')
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+
+          $exe = $candidates | Select-Object -First 1
+          if (-not $exe) {
+            $cmd = Get-Command AnyDesk.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $exe = $cmd.Source }
+          }
+          if (-not $exe) {
+            throw 'AnyDesk.exe was not found. Install AnyDesk on this self-hosted Windows runner first.'
+          }
+
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          Write-Host "Found AnyDesk executable: $exe"
+
+      - name: Read AnyDesk ID
+        id: id
+        shell: pwsh
+        env:
+          ANYDESK_EXE: ${{ steps.locate.outputs.exe }}
+        run: |
+          $exe = $env:ANYDESK_EXE
+          $id = (& $exe --get-id 2>$null | Out-String).Trim()
+
+          if (-not $id) {
+            # Start AnyDesk in the interactive user session, then retry once.
+            Start-Process -FilePath $exe -ErrorAction SilentlyContinue | Out-Null
+            Start-Sleep -Seconds 5
+            $id = (& $exe --get-id 2>$null | Out-String).Trim()
+          }
+
+          # Validate output to avoid accidentally publishing unrelated CLI text.
+          if ($id -notmatch '^\d{6,20}$') {
+            throw 'Could not obtain a valid numeric AnyDesk ID. Ensure AnyDesk is installed, running, and signed in on the interactive Windows session.'
+          }
+
+          "anydesk_id=$id" >> $env:GITHUB_OUTPUT
+          Write-Host "AnyDesk ID: $id"
+
+      - name: Show ID in workflow summary
+        shell: pwsh
+        env:
+          ANYDESK_ID: ${{ steps.id.outputs.anydesk_id }}
+        run: |
+          @"
+          ## AnyDesk Windows runner
+
+          **AnyDesk ID:** ``$env:ANYDESK_ID``
+
+          Use this ID in AnyDesk from your own device. This workflow does not expose a remote desktop or configure unattended access.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
